@@ -82,7 +82,7 @@ def make_run_name(config: RunConfig) -> str:
     clean_llm_user_name = config.llm_user.split("/")[-1]
     user_name = f"{config.user}_{clean_llm_user_name}"
 
-    return f"{get_now()}_{config.domain}_{agent_name}_{user_name}"
+    return f"{config.domain}/{config.domain}_{get_now()}_task_id_{config.task_ids}_{agent_name}_{user_name}"
 
 
 def run_domain(config: RunConfig) -> Results:
@@ -111,9 +111,21 @@ def run_domain(config: RunConfig) -> Results:
 
     num_trials = config.num_trials
     save_to = config.save_to
+    # Harry: handle save_to as None or empty string
+    if save_to == "" or save_to == "None":
+        save_to = None
     if save_to is None:
         save_to = make_run_name(config)
-    save_to = DATA_DIR / "simulations" / f"{save_to}.json"
+    save_to = DATA_DIR / "simulations" / f"{save_to}"
+    # Harry: check if save_to not ends with ".json", add it
+    if not Path(save_to).suffix == ".json":
+        save_to = f"{save_to}.json"
+
+    if config.enable_reflection.lower() in ["true", "yes", "y"]:
+        enable_reflection = True
+    else:
+        enable_reflection = False
+
     simulation_results = run_tasks(
         domain=config.domain,
         tasks=tasks,
@@ -132,6 +144,7 @@ def run_domain(config: RunConfig) -> Results:
         max_concurrency=config.max_concurrency,
         seed=config.seed,
         log_level=config.log_level,
+        enable_reflection=enable_reflection,
     )
     metrics = compute_metrics(simulation_results)
     ConsoleDisplay.display_agent_metrics(metrics)
@@ -157,6 +170,7 @@ def run_tasks(
     max_concurrency: int = 1,
     seed: Optional[int] = 300,
     log_level: Optional[str] = "INFO",
+    enable_reflection: bool = False,
 ) -> Results:
     """
     Runs tasks for a given domain.
@@ -324,6 +338,7 @@ def run_tasks(
                 max_errors=max_errors,
                 evaluation_type=evaluation_type,
                 seed=seed,
+                enable_reflection=enable_reflection,
             )
             simulation.trial = trial
             if console_display:
@@ -367,6 +382,7 @@ def run_task(
     max_errors: int = 10,
     evaluation_type: EvaluationType = EvaluationType.ALL,
     seed: Optional[int] = None,
+    enable_reflection: bool = False,
 ) -> SimulationRun:
     """
     Runs tasks for a given domain.
@@ -450,6 +466,11 @@ def run_task(
         llm_args=llm_args_user,
     )
 
+    if enable_reflection:
+        print("Reflection is enabled for this run.")
+    else:
+        print("Reflection is disabled for this run.")
+
     orchestrator = Orchestrator(
         domain=domain,
         agent=agent,
@@ -460,6 +481,7 @@ def run_task(
         max_errors=max_errors,
         seed=seed,
         solo_mode=solo_mode,
+        enable_reflection= enable_reflection,
     )
     simulation = orchestrator.run()
 

@@ -3,7 +3,7 @@ import uuid
 from copy import deepcopy
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 from loguru import logger
 
@@ -13,12 +13,15 @@ from tau2.data_model.message import (
     AssistantMessage,
     Message,
     MultiToolMessage,
+    ToolCall,
     ToolMessage,
     UserMessage,
+    ReflectionMessage
 )
 from tau2.data_model.simulation import SimulationRun, TerminationReason
 from tau2.data_model.tasks import EnvFunctionCall, InitializationData, Task
 from tau2.environment.environment import Environment, EnvironmentInfo
+from tau2.orchestrator.tool_reflector import ToolCallReflector, ToolReflectionResult
 from tau2.user.base import BaseUser, is_valid_user_history_message
 from tau2.user.user_simulator import DummyUser, UserSimulator, UserState
 from tau2.utils.llm_utils import get_cost
@@ -29,6 +32,7 @@ class Role(str, Enum):
     AGENT = "agent"
     USER = "user"
     ENV = "env"
+    REFLECTION = "reflection"
 
 
 DEFAULT_FIRST_AGENT_MESSAGE = AssistantMessage(
@@ -40,6 +44,21 @@ class Orchestrator:
     """
     Orchestrator for the simulation given a task.
     Passes messages between the Agent, User, and Environment.
+    
+    Features:
+    - Standard message routing between Agent, User, and Environment
+    - Optional tool call reflection mechanism for safety and validation
+    - Support for solo mode and multi-participant simulations
+    - Configurable termination conditions and error handling
+    
+    Tool Call Reflection:
+    When enabled, tool calls from agents or users are first sent to a reflection
+    system that uses an LLM to evaluate whether the tool call should be executed.
+    The reflection system can:
+    - Approve, reject, or modify tool calls
+    - Provide explanations for decisions
+    - Apply custom rules for specific tools
+    - Support different reflection modes (conservative, permissive, balanced)
     """
 
     def __init__(
@@ -53,6 +72,8 @@ class Orchestrator:
         max_errors: int = 10,
         seed: Optional[int] = None,
         solo_mode: bool = False,
+        enable_reflection: bool = False,
+        reflection_config: Optional[dict] = None,
     ):
         self.domain = domain
         self.agent = agent
@@ -61,6 +82,13 @@ class Orchestrator:
         self.task = task
         self.seed = seed
         self.solo_mode = solo_mode
+        self.enable_reflection = enable_reflection
+        self.tool_reflector = None
+        self.reflection_rejection_count = {}  # Track rejected tool calls
+        if self.enable_reflection:
+            reflection_config = reflection_config or {}
+            self.tool_reflector = ToolCallReflector(**reflection_config)
+            self.tool_call_decisions: List[ToolCall | ToolMessage] = []  # Store decisions from reflection
         self.agent_state: Optional[Any] = None
         self.user_state: Optional[UserState] = None
         self.trajectory: list[Message] = []
@@ -130,8 +158,8 @@ class Orchestrator:
                 self.from_role = Role.AGENT
                 if not last_message.is_tool_call():  # Last message is for the user
                     self.to_role = Role.USER
-                else:  # Last message is for the environment
-                    self.to_role = Role.ENV
+                else:  # Last message is for the environment (or reflection if enabled)
+                    self.to_role = Role.REFLECTION if self.enable_reflection else Role.ENV
                 self.agent_state = self.agent.get_init_state(
                     message_history=[
                         msg
@@ -155,8 +183,8 @@ class Orchestrator:
                 self.from_role = Role.USER
                 if not last_message.is_tool_call():  # Last message is for the agent
                     self.to_role = Role.AGENT
-                else:  # Last message is for the environment
-                    self.to_role = Role.ENV
+                else:  # Last message is for the environment (or reflection if enabled)
+                    self.to_role = Role.REFLECTION if self.enable_reflection else Role.ENV
                 self.user_state = self.user.get_init_state(
                     message_history=[
                         msg
@@ -234,7 +262,11 @@ class Orchestrator:
                 self.trajectory = [first_message]
                 self.message = first_message
                 self.from_role = Role.AGENT
-                self.to_role = Role.ENV
+                # In solo mode, if reflection is enabled and first message is a tool call, go to reflection
+                if first_message.is_tool_call() and self.enable_reflection:
+                    self.to_role = Role.REFLECTION
+                else:
+                    self.to_role = Role.ENV
                 self.done = self.agent.is_stop(first_message)
                 if self.done:
                     self.termination_reason = TerminationReason.AGENT_STOP
@@ -309,7 +341,8 @@ class Orchestrator:
             self.message = user_msg
             self.from_role = Role.USER
             if user_msg.is_tool_call():
-                self.to_role = Role.ENV
+                # If reflection is enabled, go to reflection first, otherwise go to ENV
+                self.to_role = Role.REFLECTION if self.enable_reflection else Role.ENV
             else:
                 self.to_role = Role.AGENT
         # USER/ENV -> AGENT
@@ -319,7 +352,13 @@ class Orchestrator:
             agent_msg, self.agent_state = self.agent.generate_next_message(
                 self.message, self.agent_state
             )
-            agent_msg.validate()
+            try:
+                agent_msg.validate()
+            except ValueError as e:
+                logger.error(f"Invalid agent message: {e}")
+                self.done = True
+                self.termination_reason = TerminationReason.AGENT_STOP
+                
             if self.agent.is_stop(agent_msg):
                 self.done = True
                 self.termination_reason = TerminationReason.AGENT_STOP
@@ -327,9 +366,159 @@ class Orchestrator:
             self.message = agent_msg
             self.from_role = Role.AGENT
             if agent_msg.is_tool_call():
-                self.to_role = Role.ENV
+                # If reflection is enabled, go to reflection first, otherwise go to ENV
+                self.to_role = Role.REFLECTION if self.enable_reflection else Role.ENV
             else:
                 self.to_role = Role.USER
+        # AGENT/USER -> REFLECTION
+        elif self.from_role in [Role.AGENT, Role.USER] and self.to_role == Role.REFLECTION:
+            if not self.message.is_tool_call():
+                raise ValueError("Only tool calls should be sent to reflection")
+            
+            # Build context for reflection
+            reflection_context = self._build_reflection_context()
+            
+            # Store original tool calls for comparison
+            original_calls = deepcopy(self.message.tool_calls)
+            original_msg = deepcopy(self.message)
+            # # Check if this is a repeated attempt at the same tool call
+            # tool_signature = self._get_tool_call_signature(self.message.tool_calls[0])
+            # rejection_count = self.reflection_rejection_count.get(tool_signature, 0)
+            
+            # # After 2 rejections, allow the tool call to proceed (respect user/agent persistence)
+            # if rejection_count >= 2:
+            #     # Reset counter since we're allowing execution
+            #     self.reflection_rejection_count[tool_signature] = 0
+            #     self.to_role = Role.ENV
+            #     logger.info(f"Allowing tool call after {rejection_count} rejections due to persistence")
+            # else:
+            #     # Process each tool call individually
+            tool_call_decisions = []
+            
+            for tool_call in self.message.tool_calls:
+                # Check if tool prompt is available for this tool call
+                if not self.tool_reflector.has_tool_prompt(self.domain, tool_call.name):
+                    # Log and skip reflection for this tool call
+                    logger.info(f"Tool prompt not available for {tool_call.name}, skipping reflection")
+                    tool_call_decisions.append(tool_call)
+                    # Add reflection message about skipped tool call
+                    reflection_note = self._create_reflection_message(
+                        content=f"REFLECTION_SKIPPED: Tool prompt not available for {tool_call.name}",
+                    )
+                    self.trajectory.append(reflection_note)
+                    continue
+
+                # Check rejection count for this specific tool call
+                individual_signature = self._get_tool_call_signature(tool_call)
+                individual_rejection_count = self.reflection_rejection_count.get(individual_signature, 0)
+                
+                # After 2 rejections, allow this tool call to proceed
+                if individual_rejection_count >= 2:
+                    self.reflection_rejection_count[individual_signature] = 0
+                    tool_call_decisions.append(tool_call)
+                    # Add reflection message about approved calls
+                    reflection_note = self._create_reflection_message(
+                            content="REFLECTION_PERSISTENCE_APPROVE: Tool call was allowed after multiple rejections due to persistence",
+                        )
+                    self.trajectory.append(reflection_note)
+                    logger.info(f"Allowing tool call {tool_call.name} after {individual_rejection_count} rejections due to persistence")
+                    continue
+                
+                # Perform reflection on individual tool call
+                reflection_result = self.tool_reflector.reflect_on_tool_call(
+                    tool_call, reflection_context
+                )
+                
+                if reflection_result.should_execute:
+                    # Add approved/modified tool calls
+                    tool_call_decisions.append(reflection_result.tool_call)
+                    
+                    # Add reflection message about approved calls
+                    if self._tool_call_were_modified(tool_call, reflection_result.tool_call):
+                        reflection_note = self._create_reflection_message(
+                            content="REFLECTION_MODIFIED: Some tool call parameters were adjusted by the reflection system",
+                        )
+                        self.trajectory.append(reflection_note)
+                        logger.info("Some tool calls were modified by the reflection system")
+                    else:
+                        reflection_note = self._create_reflection_message(
+                            content="REFLECTION_APPROVED: Tool calls were approved without modifications",
+                        )
+                        self.trajectory.append(reflection_note)
+                        logger.info("Tool calls approved without modifications")
+
+                    # Reset rejection counter for this tool call
+                    if individual_signature in self.reflection_rejection_count:
+                        self.reflection_rejection_count[individual_signature] = 0
+                else:
+                    # Tool call was rejected
+                    self.reflection_rejection_count[individual_signature] = individual_rejection_count + 1
+                    
+                    # Create rejection tool message for this specific tool call to be sent to the environment
+                    rejection_tool_msg = self._create_rejection_tool_message(
+                        original_tool_call=tool_call,
+                        reason=reflection_result.reason,
+                        requestor=tool_call.requestor
+                    )
+
+                    tool_call_decisions.append(rejection_tool_msg)
+
+                    # Add reflection message about rejection
+                    rejection_note = self._create_reflection_message(
+                        content=f"REFLECTION_REJECTED: Tool call {tool_call.name} was rejected by reflection: {reflection_result.reason}",
+                    )
+                    self.trajectory.append(rejection_note)
+            
+            self.tool_call_decisions = deepcopy(tool_call_decisions)
+
+            # update the timestamp to match the current time
+            original_msg.timestamp = get_now()
+            self.trajectory.append(original_msg)
+
+            self.from_role = Role.REFLECTION
+            self.to_role = Role.ENV
+
+        # REFLECTION -> ENV
+        elif self.from_role == Role.REFLECTION and self.to_role == Role.ENV:
+            if not self.tool_call_decisions:
+                raise ValueError("No tool call decisions available from reflection")
+            requestor = self.tool_call_decisions[0].requestor
+            tool_msgs = []
+            for tool_call_decision in self.tool_call_decisions:
+                if isinstance(tool_call_decision, ToolCall):
+                    # If it's a ToolCall, it means the tool call was approved or modified
+                    tool_msg = self.environment.get_response(tool_call_decision)
+                elif isinstance(tool_call_decision, ToolMessage):
+                    # If it's a ToolMessage, it means the tool call was rejected
+                    # update the timestamp to match the current time
+                    tool_call_decision.timestamp = get_now()
+                    tool_msg = tool_call_decision
+                else:
+                    raise ValueError(
+                        f"Invalid tool call decision type: {type(tool_call_decision)}. Must be ToolCall or ToolMessage."
+                    )
+                tool_msgs.append(tool_msg)
+                
+            assert len(self.tool_call_decisions) == len(tool_msgs), (
+                "Number of tool calls and tool call decisions should be the same"
+            )
+            self.trajectory.extend(tool_msgs)
+            if (
+                len(tool_msgs) > 1
+            ):  # Packaging multiple tool messages into a MultiToolMessage
+                self.message = MultiToolMessage(
+                    role="tool",
+                    tool_messages=tool_msgs,
+                )
+            else:
+                self.message = tool_msgs[0]
+            
+            if requestor == "assistant":
+                self.to_role = Role.AGENT
+            if requestor == "user":
+                self.to_role = Role.USER
+            self.from_role = Role.ENV
+
         # AGENT/USER -> ENV
         elif self.from_role in [Role.AGENT, Role.USER] and self.to_role == Role.ENV:
             if not self.message.is_tool_call():
@@ -380,7 +569,7 @@ class Orchestrator:
     def validate_message_history(cls, message_history: list[Message]):
         """
         Validate a message history.
-            - Should only contain AssistantMessage, UserMessage, ToolMessage
+            - Should only contain AssistantMessage, UserMessage, ToolMessage, ReflectionMessage.
             - All assistant/user messages should be either to user or tool call, not both.
             - If n tool calls are made by a participant, exactly n tool messages should follow with requestor matching the participant.
         """
@@ -450,3 +639,68 @@ class Orchestrator:
         for i, msg in enumerate(message_history):
             msg.timestamp = format_time(time_offset + timedelta(seconds=i))
         return message_history
+
+    def _get_tool_call_signature(self, tool_call: ToolCall) -> str:
+        """Create a simple signature for a tool call to track repeated attempts."""
+        # Simple signature: tool_name + sorted argument keys
+        arg_keys = sorted(tool_call.arguments.keys()) if tool_call.arguments else []
+        return f"{tool_call.name}({','.join(arg_keys)})"
+
+    def _tool_call_were_modified(self, original_call: ToolCall, modified_call: ToolCall) -> bool:
+        """Simple check if tool call were modified by reflection."""
+        if original_call.name != modified_call.name or original_call.arguments != modified_call.arguments:
+            return True
+        return False
+
+
+    def _create_rejection_tool_message(self, original_tool_call: ToolCall, reason: str, requestor: str) -> ToolMessage:
+        """Create a tool message indicating that the tool call was rejected by reflection."""
+        # return ReflectionMessage(
+        #     id="reflection_rejection",
+        #     role="reflection",
+        #     content=f"Reflection system suggests reconsidering this tool call: {reason}. Please review and try again if appropriate.",
+        #     timestamp=get_now(),
+        #     requestor=requestor,
+        # )
+        rejection_response = ToolMessage(
+            id=original_tool_call.id,  # Use the SAME ID as the tool call
+            role="tool",
+            content=f"Tool call rejected by reflection system: {reason}",
+            requestor=requestor,
+            error=False,  # Not an error, just a policy decision
+            timestamp=get_now(),
+        )
+        return rejection_response
+
+    def _create_reflection_message(self, content: str) -> ReflectionMessage:
+        """Create a reflection message."""
+        return ReflectionMessage(
+            role="reflection",
+            content=content,
+            timestamp=get_now(),
+        )
+
+    def _build_reflection_context(self) -> dict:
+        """Build context information for tool call reflection."""
+        context = {
+            "conversation_history": self.trajectory,
+            "available_tools": self.environment.get_tools(),
+            "task_context": getattr(self.task, "description", ""),
+            "domain": self.domain,
+            "current_step": self.step_count,
+        }
+        
+        # Add role-aware context
+        if self.message and self.message.is_tool_call() and self.message.tool_calls:
+            tool_call = self.message.tool_calls[0]  # Use first tool call for context
+            requestor = tool_call.requestor
+            
+            # Role-aware context
+            if requestor == "assistant":
+                # Include agent's system prompt for agent tool calls
+                context["agent_system_prompt"] = self.agent.system_prompt
+            elif requestor == "user":
+                # Include task description for user tool calls  
+                context["user_task_description"] = getattr(self.task, "description", "")
+        
+        return context

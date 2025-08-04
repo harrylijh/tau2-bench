@@ -19,6 +19,7 @@ from tau2.config import (
     DEFAULT_NUM_TRIALS,
     DEFAULT_SAVE_TO,
     DEFAULT_SEED,
+    ENABLE_REFLECTION
 )
 from tau2.data_model.message import Message
 from tau2.data_model.tasks import Action, EnvAssertion, RewardType, Task
@@ -151,6 +152,13 @@ class RunConfig(BaseModel):
         Field(
             description="The log level to use for the simulation",
             default=DEFAULT_LOG_LEVEL,
+        ),
+    ]
+    enable_reflection: Annotated[
+        str,
+        Field(
+            description="Whether to enable reflection in the simulation",
+            default=str(ENABLE_REFLECTION),
         ),
     ]
 

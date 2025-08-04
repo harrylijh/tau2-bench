@@ -205,17 +205,34 @@ def generate(
     tools = [tool.openai_schema for tool in tools] if tools else None
     if tools and tool_choice is None:
         tool_choice = "auto"
-    try:
-        response = completion(
-            model=model,
-            messages=litellm_messages,
-            tools=tools,
-            tool_choice=tool_choice,
-            **kwargs,
-        )
-    except Exception as e:
-        logger.error(e)
-        raise e
+
+    # Harry: temporary workaround for gpt-4.1-mini and o4-mini; use azure endpoint
+    if model == "gpt-4.1-mini" or model == 'o4-mini' or model == 'gpt-4.1':
+        try:
+            response = completion(
+                model=model,
+                messages=litellm_messages,
+                tools=tools,
+                tool_choice=tool_choice,
+                custom_llm_provider = "azure",
+                **kwargs,
+            )
+        except Exception as e:
+            logger.error(e)
+            raise e
+    else:
+        try:
+            response = completion(
+                model=model,
+                messages=litellm_messages,
+                tools=tools,
+                tool_choice=tool_choice,
+                custom_llm_provider="openai",
+                **kwargs,
+            )
+        except Exception as e:
+            logger.error(e)
+            raise e
     cost = get_response_cost(response)
     usage = get_response_usage(response)
     response = response.choices[0]

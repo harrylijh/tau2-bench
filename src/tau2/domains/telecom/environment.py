@@ -12,6 +12,7 @@ from tau2.domains.telecom.utils import (
     TELECOM_MAIN_POLICY_PATH,
     TELECOM_MAIN_POLICY_SOLO_PATH,
     TELECOM_TASK_SET_PATH,
+    TELECOM_TASK_SET_PATH_SAMPLED,
     TELECOM_TASK_SET_PATH_FULL,
     TELECOM_TASK_SET_PATH_SMALL,
     TELECOM_TECH_SUPPORT_POLICY_MANUAL_PATH,
@@ -125,12 +126,12 @@ def get_environment(
     main_policy = load_file(policy_path)
     tech_support_policy = load_file(tech_support_policy_path)
     policy = (
-        "<main_policy>\n"
+        "=== start of main_policy ===\n"
         + main_policy
-        + "\n</main_policy>\n"
-        + "<tech_support_policy>\n"
+        + "\n=== end of main_policy ===\n"
+        + "=== start of tech_support_policy ===\n"
         + tech_support_policy
-        + "\n</tech_support_policy>"
+        + "\n=== end of tech_support_policy ==="
     )
     if policy_type == "manual":
         domain_name = "telecom"
@@ -165,6 +166,10 @@ def get_tasks_full() -> list[Task]:
 
 def get_tasks_small() -> list[Task]:
     return load_tasks(TELECOM_TASK_SET_PATH_SMALL)
+
+
+def get_tasks_sampled() -> list[Task]:
+    return load_tasks(TELECOM_TASK_SET_PATH_SAMPLED)
 
 
 def get_tasks() -> list[Task]:

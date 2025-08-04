@@ -12,6 +12,7 @@ from tau2.data_model.message import (
     ToolCall,
     ToolMessage,
     UserMessage,
+    ReflectionMessage
 )
 from tau2.data_model.tasks import EnvAssertion, EnvFunctionCall, InitializationData
 from tau2.environment.db import DB
@@ -297,6 +298,12 @@ class Environment:
                         if len(messages) == 0:
                             raise ValueError("Tool message expected. Got None.")
                         tm = messages.pop()
+                        # Skip reflection-generated messages
+                        if isinstance(tm, ReflectionMessage):
+                            continue
+                        if isinstance(tm, ToolMessage) and "Tool call rejected by reflection system:" in tm.content:
+                            continue
+                        
                         if not isinstance(tm, ToolMessage):
                             raise ValueError(f"Tool message expected. Got {type(tm)}")
                         if tc.id != tm.id:
@@ -319,6 +326,9 @@ class Environment:
 
         action_responses = get_actions_from_messages(message_history)
         for tool_call, expected_response in action_responses:
+            if 'reflection' in expected_response.content:
+                # Skip reflection messages
+                continue
             response = self.get_response(tool_call)
             try:
                 content = json.loads(response.content)

@@ -29,6 +29,8 @@ from tau2.domains.telecom.environment import \
 from tau2.domains.telecom.environment import \
     get_tasks_full as telecom_domain_get_tasks_full
 from tau2.domains.telecom.environment import \
+    get_tasks_sampled as telecom_domain_get_tasks_sampled
+from tau2.domains.telecom.environment import \
     get_tasks_small as telecom_domain_get_tasks_small
 from tau2.environment.environment import Environment
 from tau2.user.base import BaseUser
@@ -189,6 +191,7 @@ try:
     )
     registry.register_tasks(telecom_domain_get_tasks_full, "telecom_full")
     registry.register_tasks(telecom_domain_get_tasks_small, "telecom_small")
+    registry.register_tasks(telecom_domain_get_tasks_sampled, "telecom_sampled")
     registry.register_tasks(telecom_domain_get_tasks, "telecom")
     registry.register_tasks(telecom_domain_get_tasks, "telecom-workflow")
     logger.debug(f"Default components registered successfully. Registry info: {json.dumps(registry.get_info().model_dump(), indent=2)}")

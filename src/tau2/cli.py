@@ -13,6 +13,7 @@ from tau2.config import (
     DEFAULT_NUM_TRIALS,
     DEFAULT_SEED,
     DEFAULT_USER_IMPLEMENTATION,
+    ENABLE_REFLECTION
 )
 from tau2.data_model.simulation import RunConfig
 from tau2.run import get_options, run_domain
@@ -127,6 +128,12 @@ def add_run_args(parser):
         default=DEFAULT_LOG_LEVEL,
         help=f"The log level to use for the simulation. Default is {DEFAULT_LOG_LEVEL}.",
     )
+    parser.add_argument(
+        "--enable-reflection",
+        type=str,
+        default=ENABLE_REFLECTION,
+        help="Enable reflection in the agent. Default is False.",
+    )
 
 
 def main():
@@ -156,6 +163,7 @@ def main():
                 max_concurrency=args.max_concurrency,
                 seed=args.seed,
                 log_level=args.log_level,
+                enable_reflection=args.enable_reflection,
             )
         )
     )

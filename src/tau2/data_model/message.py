@@ -9,6 +9,7 @@ SystemRole = Literal["system"]
 UserRole = Literal["user"]
 AssistantRole = Literal["assistant"]
 ToolRole = Literal["tool"]
+ReflectionRole = Literal["reflection"]
 ToolRequestor = Literal["user", "assistant"]
 
 
@@ -173,6 +174,17 @@ class UserMessage(ParticipantMessageBase):
 
     role: UserRole = Field(description="The role of the message sender.")
 
+class ReflectionMessage(ParticipantMessageBase):
+    """
+    A message from the reflection.
+    """
+
+    role: ReflectionRole = Field(description="The role of the message sender.")
+    requestor: Optional[str] = Field(
+        description="The requestor of the initial tool call.",
+        default=None,
+    )
+
 
 class ToolMessage(BaseModel):
     """
@@ -229,5 +241,5 @@ class MultiToolMessage(BaseModel):
 
 APICompatibleMessage = SystemMessage | AssistantMessage | UserMessage | ToolMessage
 Message = (
-    SystemMessage | AssistantMessage | UserMessage | ToolMessage | MultiToolMessage
+    SystemMessage | AssistantMessage | UserMessage | ToolMessage | MultiToolMessage | ReflectionMessage
 )

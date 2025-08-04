@@ -117,7 +117,15 @@ class NLAssertionsEvaluator:
             messages=messages,
             **DEFAULT_LLM_NL_ASSERTIONS_ARGS,
         )
-        result_data = json.loads(assistant_message.content)
+
+        ## Harry: Error handling for the parsing of the assistant's response
+        message_content = assistant_message.content.strip('json```').strip('```')
+        try:
+            result_data = json.loads(message_content)
+        except json.JSONDecodeError as e:
+            print(f"Failed to parse JSON from assistant message: {e}")
+            return []
+        
         return [
             NLAssertionCheck(
                 nl_assertion=result["expectedOutcome"],

@@ -20,7 +20,7 @@ TELECOM_TECH_SUPPORT_POLICY_WORKFLOW_SOLO_PATH = (
 TELECOM_TASK_SET_PATH_FULL = TELECOM_DATA_DIR / "tasks_full.json"
 TELECOM_TASK_SET_PATH_SMALL = TELECOM_DATA_DIR / "tasks_small.json"
 TELECOM_TASK_SET_PATH = TELECOM_DATA_DIR / "tasks.json"
-
+TELECOM_TASK_SET_PATH_SAMPLED = TELECOM_DATA_DIR / "tasks_sampled.json"
 
 def get_now() -> datetime:
     # assume now is 2025-02-25 12:08:00
