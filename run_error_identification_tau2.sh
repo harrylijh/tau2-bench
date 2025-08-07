@@ -30,9 +30,6 @@ OUTPUT_JSON="err_ana_results/analysis-by-author_${BASENAME}_tasks-${TASK_IDS_CLE
 mkdir -p "$(dirname "$OUTPUT_JSON")"
 
 
-export OPENAI_API_KEY="sk-5v0aDB9hXoZzxtmGitpAgA"  # Set your OpenAI API key here
-export OPENAI_BASE_URL="http://ai06.labs.hpecorp.net:4000"  # Set your OpenAI API base URL here
-
 set -e  # Exit on error
 
 # Run the script
